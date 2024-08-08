@@ -1,36 +1,21 @@
-terraform {
-  cloud {
-    organization = "hashi_strawb_testing"
 
-    workspaces {
-      name = "vault-aws-secrets-wif"
-    }
-  }
+locals {
+  oidc_audience      = "${var.vault_addr}/v1/identity/oidc/plugins"
+  vault_plugins_addr = "${var.vault_addr}/v1/identity/oidc/plugins"
 }
-
-variable "oidc_audience" {
-  #  default = "vault.lmhd.me:443/v1/identity/oidc/plugins"
-  default = "vault-plugin-wif.lucy-davinhart.sbx.hashidemos.io:443/v1/demos/plugin-wif/identity/oidc/plugins"
-}
-variable "vault_plugins_addr" {
-  # default = "https://vault.lmhd.me/v1/identity/oidc/plugins"
-  default = "https://vault-plugin-wif.lucy-davinhart.sbx.hashidemos.io/v1/demos/plugin-wif/identity/oidc/plugins"
-}
-
-
 
 # https://developer.hashicorp.com/vault/docs/secrets/aws#plugin-workload-identity-federation-wif
 data "tls_certificate" "vault_certificate" {
-  url = var.vault_plugins_addr
+  url = local.vault_plugins_addr
 }
 resource "aws_iam_openid_connect_provider" "vault_provider" {
   url             = data.tls_certificate.vault_certificate.url
-  client_id_list  = [var.oidc_audience]
+  client_id_list  = [local.oidc_audience]
   thumbprint_list = [data.tls_certificate.vault_certificate.certificates[0].sha1_fingerprint]
 }
 
 resource "aws_iam_role" "plugins_role" {
-  name = "vault-lmhd-me-oidc-plugins"
+  name = "vault-oidc-plugins"
 
   assume_role_policy = <<EOF
 {
@@ -57,17 +42,10 @@ EOF
   }
 }
 
-
-provider "vault" {
-  namespace = "demos/plugin-wif/"
-}
-
-
-
 resource "vault_generic_endpoint" "identity_config" {
   path = "identity/oidc/config"
   data_json = jsonencode({
-    "issuer" = "https://vault-plugin-wif.lucy-davinhart.sbx.hashidemos.io"
+    "issuer" = "${var.vault_addr}"
   })
 
   // delete on this path is unsupported
@@ -80,9 +58,9 @@ resource "vault_generic_endpoint" "identity_config" {
 locals {
   username_template = <<EOT
 {{ if (eq .Type "STS") }}
-	{{ printf "demo-lucy.davinhart@hashicorp.com-vault-%s-%s" (random 20) (unix_time) | truncate 32 }}
+	{{ printf "demo-jrepnak@hashicorp.com-vault-%s-%s" (random 20) (unix_time) | truncate 32 }}
 {{ else }}
-	{{ printf "demo-lucy.davinhart@hashicorp.com-vault-%s-%s" (unix_time) (random 20) | truncate 60 }}
+	{{ printf "demo-jrepnak@hashicorp.com-vault-%s-%s" (unix_time) (random 20) | truncate 60 }}
 {{ end }}
 EOT
 
@@ -108,8 +86,8 @@ data "aws_iam_policy" "demo_user_permissions_boundary" {
 
 
 resource "vault_aws_secret_backend" "aws" {
-  path                    = "aws/hashi"
-  identity_token_audience = var.oidc_audience
+  path                    = "aws"
+  identity_token_audience = local.oidc_audience
   role_arn                = aws_iam_role.plugins_role.arn
 
 
@@ -117,7 +95,7 @@ resource "vault_aws_secret_backend" "aws" {
   username_template = local.username_template_without_whitespace
 }
 
-resource "vault_generic_endpoint" "aws-lmhd-lease" {
+resource "vault_generic_endpoint" "lease" {
   path = "${vault_aws_secret_backend.aws.path}/config/lease"
 
   data_json = <<EOT
@@ -155,9 +133,4 @@ resource "vault_aws_secret_backend_role" "test" {
     ]
 }
 EOT
-}
-
-
-output "test_command" {
-  value = "vault read ${vault_aws_secret_backend.aws.path}/creds/${vault_aws_secret_backend_role.test.name}"
 }

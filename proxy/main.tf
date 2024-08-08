@@ -1,26 +1,7 @@
 
-terraform {
-  cloud {
-    organization = "hashi_strawb_testing"
-
-    workspaces {
-      name = "vault-plugin-wif-proxy"
-    }
-  }
-}
-
-
-variable "vault_addr" {
-  default = "https://vault.lmhd.me"
-}
-variable "vault_namespace" {
-  default = "demos/plugin-wif/"
-}
-
 locals {
   proxy_url = "${var.vault_addr}/v1/${var.vault_namespace}identity/oidc/plugins"
 }
-
 
 # Based losely on https://github.com/hashicorp/terraform-provider-aws/tree/main/examples/api-gateway-rest-api-openapi
 
@@ -28,6 +9,8 @@ locals {
 #
 # API Gateway
 #
+
+# TODO: Proxy via VPC Link to the private AWS NLB
 
 resource "aws_api_gateway_rest_api" "example" {
   body = jsonencode({
@@ -43,9 +26,9 @@ resource "aws_api_gateway_rest_api" "example" {
             httpMethod           = "GET"
             payloadFormatVersion = "1.0"
             type                 = "HTTP_PROXY"
+            connectionType       = "VPC_LINK"
+            connectionId         = var.vpc_link_id
             uri                  = "${local.proxy_url}/.well-known/openid-configuration"
-            #uri = "https://ip-ranges.amazonaws.com/ip-ranges.json"
-
           }
         }
       }
@@ -55,8 +38,9 @@ resource "aws_api_gateway_rest_api" "example" {
             httpMethod           = "GET"
             payloadFormatVersion = "1.0"
             type                 = "HTTP_PROXY"
+            connectionType       = "VPC_LINK"
+            connectionId         = var.vpc_link_id
             uri                  = "${local.proxy_url}/.well-known/keys"
-            #uri = "https://ip-ranges.amazonaws.com/ip-ranges.json"
           }
         }
       }
@@ -89,15 +73,9 @@ resource "aws_api_gateway_stage" "example" {
 }
 
 
-
 #
 # ACM Cert
 #
-
-variable "hosted_zone" {
-  default = "lucy-davinhart.sbx.hashidemos.io"
-}
-
 
 resource "aws_acm_certificate" "example" {
   domain_name       = "vault-plugin-wif.${var.hosted_zone}"
@@ -130,8 +108,6 @@ resource "aws_acm_certificate_validation" "example" {
   certificate_arn         = aws_acm_certificate.example.arn
   validation_record_fqdns = [for record in aws_route53_record.example : record.fqdn]
 }
-
-
 
 
 #
