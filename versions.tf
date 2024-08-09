@@ -9,5 +9,9 @@ terraform {
 }
 
 provider "vault" {
-  namespace = ""
+  namespace = var.vault_namespace
+}
+
+provider "aws" {
+  region = var.aws_region
 }

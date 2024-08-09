@@ -1,16 +1,17 @@
 
 locals {
-  proxy_url = "${var.vault_addr}/v1/${var.vault_namespace}identity/oidc/plugins"
+  my_email = split("/", data.aws_caller_identity.current.arn)[2]
 }
 
-# Based losely on https://github.com/hashicorp/terraform-provider-aws/tree/main/examples/api-gateway-rest-api-openapi
+data "aws_caller_identity" "current" {}
 
+data "aws_region" "current" {}
+
+# Based on https://github.com/hashi-strawb/tf-vault-aws-plugin-wif
 
 #
 # API Gateway
 #
-
-# TODO: Proxy via VPC Link to the private AWS NLB
 
 resource "aws_api_gateway_rest_api" "example" {
   body = jsonencode({
@@ -29,6 +30,10 @@ resource "aws_api_gateway_rest_api" "example" {
             connectionType       = "VPC_LINK"
             connectionId         = var.vpc_link_id
             uri                  = "${local.proxy_url}/.well-known/openid-configuration"
+            tlsConfig = {
+              insecureSkipVerification = true
+              serverNameToVerify       = "vault.jrx.de"
+            }
           }
         }
       }
@@ -41,13 +46,17 @@ resource "aws_api_gateway_rest_api" "example" {
             connectionType       = "VPC_LINK"
             connectionId         = var.vpc_link_id
             uri                  = "${local.proxy_url}/.well-known/keys"
+            tlsConfig = {
+              insecureSkipVerification = true
+              serverNameToVerify       = "vault.jrx.de"
+            }
           }
         }
       }
     }
   })
 
-  name = "Plugin WIF Proxy"
+  name = "Vault Plugin WIF Proxy for ${var.vault_addr}"
 
   endpoint_configuration {
     types = ["REGIONAL"]
@@ -69,7 +78,7 @@ resource "aws_api_gateway_deployment" "example" {
 resource "aws_api_gateway_stage" "example" {
   deployment_id = aws_api_gateway_deployment.example.id
   rest_api_id   = aws_api_gateway_rest_api.example.id
-  stage_name    = "v1" # TODO: Change this to something to reflext the specific Vault we're proxying
+  stage_name    = "v1"
 }
 
 
@@ -77,14 +86,29 @@ resource "aws_api_gateway_stage" "example" {
 # ACM Cert
 #
 
-resource "aws_acm_certificate" "example" {
-  domain_name       = "vault-plugin-wif.${var.hosted_zone}"
-  validation_method = "DNS"
+locals {
+  // email_username is everything before @ in local.my_email
+  email_username = split("@", local.my_email)[0]
+
+  // derived zone is email_username
+  // with dots replaced by dashes
+  // and the suffix defined in var.hosted_zone_suffix
+  derived_hosted_zone = "${replace(local.email_username, ".", "-")}${var.hosted_zone_suffix}"
+
+
+  // use var.hosted_zone if set, otherwise use the derived zone
+  hosted_zone = var.hosted_zone != "" ? var.hosted_zone : local.derived_hosted_zone
 }
 
-data "aws_route53_zone" "example" {
-  name         = var.hosted_zone
+
+data "aws_route53_zone" "demo_zone" {
+  name         = local.hosted_zone
   private_zone = false
+}
+
+resource "aws_acm_certificate" "example" {
+  domain_name       = "${var.proxy_prefix}${local.hosted_zone}"
+  validation_method = "DNS"
 }
 
 resource "aws_route53_record" "example" {
@@ -101,7 +125,7 @@ resource "aws_route53_record" "example" {
   records         = [each.value.record]
   ttl             = 60
   type            = each.value.type
-  zone_id         = data.aws_route53_zone.example.zone_id
+  zone_id         = data.aws_route53_zone.demo_zone.zone_id
 }
 
 resource "aws_acm_certificate_validation" "example" {
@@ -109,10 +133,21 @@ resource "aws_acm_certificate_validation" "example" {
   validation_record_fqdns = [for record in aws_route53_record.example : record.fqdn]
 }
 
+#
+# Custom Domain for Proxy
+#
 
-#
-# Custom Domain
-#
+resource "aws_route53_record" "domain" {
+  zone_id = data.aws_route53_zone.demo_zone.zone_id
+  name    = "${var.proxy_prefix}${local.hosted_zone}"
+  type    = "A"
+
+  alias {
+    name                   = aws_api_gateway_domain_name.example.regional_domain_name
+    zone_id                = aws_api_gateway_domain_name.example.regional_zone_id
+    evaluate_target_health = true
+  }
+}
 
 resource "aws_api_gateway_domain_name" "example" {
   depends_on = [
@@ -134,32 +169,3 @@ resource "aws_api_gateway_base_path_mapping" "example" {
   stage_name  = aws_api_gateway_stage.example.stage_name
 }
 
-resource "aws_route53_record" "domain" {
-  zone_id = data.aws_route53_zone.example.zone_id
-  name    = "vault-plugin-wif.${var.hosted_zone}"
-  type    = "A"
-
-  alias {
-    name                   = aws_api_gateway_domain_name.example.regional_domain_name
-    zone_id                = aws_api_gateway_domain_name.example.regional_zone_id
-    evaluate_target_health = true
-  }
-}
-
-
-
-#
-# Outputs
-#
-
-output "invoke_url" {
-  value = "${aws_api_gateway_stage.example.invoke_url}/${var.vault_namespace}identity/oidc/plugins/.well-known/openid-configuration"
-}
-
-
-output "proxy_url" {
-  depends_on = [aws_api_gateway_base_path_mapping.example]
-
-  description = "API Gateway Domain URL (self-signed certificate)"
-  value       = "https://vault-plugin-wif.${var.hosted_zone}/v1/${var.vault_namespace}identity/oidc/plugins/.well-known/openid-configuration"
-}
